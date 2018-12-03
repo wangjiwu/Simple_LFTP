@@ -4,8 +4,7 @@ import struct
 import threading
 import queue
 import time
-
-RCV_BUFFER_SIZE = 30
+RCV_BUFFER_SIZE = 50
 BUF_SIZE = 1500
 FILE_BUF_SIZE = 1024
 SERVER_PORT = 12000
@@ -14,7 +13,6 @@ SERVER_FOLDER = 'ServerFiles/'
 # 传输文件时的数据包格式(序列号，确认号，文件结束标志，1024B的数据)
 # pkt_value = (int seq, int ack, int end_flag 1024B的byte类型 data)
 pkt_struct = struct.Struct('IIII1024s')
-
 
 def recv_ACK(server_socket):
     while True:
@@ -26,6 +24,7 @@ def recv_ACK(server_socket):
             break
 
 
+
 # 接收到lget命令，向客户端发送文件
 def lget(server_socket, client_address, large_file_name):
     print('正在发送', large_file_name)
@@ -34,7 +33,7 @@ def lget(server_socket, client_address, large_file_name):
     # 发送数据包次数计数
     pkt_count = 0
 
-    thread = threading.Thread(target=recv_ACK, args=(server_socket,))
+    thread = threading.Thread(target=recv_ACK, args=(server_socket, ))
     thread.start()
     # 用缓冲区循环发送数据包
 
@@ -42,22 +41,24 @@ def lget(server_socket, client_address, large_file_name):
         data = file_to_send.read(FILE_BUF_SIZE)
         seq = pkt_count
         ack = pkt_count
-        # time.sleep(0.00000005)
+
         # 将元组打包发送
         if str(data) != "b''":  # b''表示文件读完
             end_flag = 0
             server_socket.sendto(pkt_struct.pack(*(seq, ack, end_flag, 0, data)), client_address)
         else:
-            end_flag = 1  # 发送的结束标志为1，表示文件已发送完毕
+            end_flag = 1    # 发送的结束标志为1，表示文件已发送完毕
             server_socket.sendto(pkt_struct.pack(*(seq, ack, end_flag, 0, 'end'.encode('utf-8'))), client_address)
             break
         # 等待客户端ACK
         print("发送seq" + str(seq))
 
+
         pkt_count += 1
 
     file_to_send.close()
     print(large_file_name, '发送完毕，发送数据包的数量：' + str(pkt_count))
+    
 
 
 # 接收到lsend命令，客户端向服务端发送文件
@@ -78,19 +79,29 @@ def lsend(server_socket, client_address, large_file_name):
     buff = queue.Queue()
     server_socket.setblocking(False)
     end_flag = False
+    flag = True
+    rwnd = buff.qsize()
     while True:
         try:
             packed_data, client_address = server_socket.recvfrom(BUF_SIZE)
-            buff.put(packed_data)
+
             unpacked_data = pkt_struct.unpack(packed_data)
             seq = unpacked_data[0]
+
+            if seq < expect_pkt:
+                continue
+            if seq == 200 and flag:
+                flag = False
+                continue
+            buff.put(packed_data)
             print("收到数据包" + str(seq))
 
-        # 使用流控制确保在网络上传输的数据包不会大于BUFFSIZE
-        except:
-            while not buff.empty():
 
-                rwnd = RCV_BUFFER_SIZE - buff.qsize()
+        #使用流控制确保在网络上传输的数据包不会大于BUFFSIZE
+        except BlockingIOError:
+
+            while not buff.empty():
+                rwnd = RCV_BUFFER_SIZE - buff.qsize() - 1
                 print("rwnd " + str(rwnd))
                 pkt = buff.get()
                 unpacked_pkt = pkt_struct.unpack(pkt)
@@ -99,18 +110,29 @@ def lsend(server_socket, client_address, large_file_name):
                 data = unpacked_pkt[4]
                 print("处理数据包" + str(seq))
                 if expect_pkt != seq:
+                    while True:
+                        try:
+                            server_socket.sendto(pkt_struct.pack(*(1, expect_pkt - 1, 1, rwnd, "".encode('utf-8'))), client_address)
+                            print("发送ACK" + str(expect_pkt - 1))
+                            break
+                        except socket.error:
+                            continue
 
-                    server_socket.sendto(pkt_struct.pack(*(1, expect_pkt - 1, 1, rwnd, data)), client_address)
-                    print("send ACK packet: " + str(expect_pkt - 1))
+
                 else:
                     if end_flag != 1:
                         pkt_count += 1
                         file_to_recv.write(data)
-                        server_socket.sendto(pkt_struct.pack(*(1, expect_pkt, 1, rwnd, data)), client_address)
-                        print("send ACK packet: " + str(expect_pkt))
-
-                        expect_pkt += 1
-
+                        #time.sleep(0.1)
+                        print(str(rwnd))
+                        while True:
+                            try:
+                                server_socket.sendto(pkt_struct.pack(*(1, expect_pkt, 1, rwnd, "".encode('utf-8'))), client_address)
+                                print("发送ACK" + str(expect_pkt))
+                                expect_pkt += 1
+                                break
+                            except socket.error:
+                                continue
 
         if end_flag:
             break
@@ -156,6 +178,7 @@ def serve_client(client_address, message):
         lsend(server_socket, client_address, large_file_name)
 
     # 关闭socket
+
 
     server_socket.close()
 
