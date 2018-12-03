@@ -16,7 +16,6 @@ cwnd = 1
 ssthresh = 64
 mutex = threading.Lock()
 
-
 # 传输文件时的数据包格式(序列号，确认号，文件结束标志，1024B的数据)
 # pkt_value = (int seq, int ack, int end_flag 1024B的byte类型 data)
 
@@ -225,36 +224,86 @@ def lsend(client_socket, server_address, large_file_name):
 
 
 def lget(client_socket, server_address, large_file_name):
-    print("LFTP lget", server_address, large_file_name)
-    # 创建文件。模式wb 以二进制格式打开一个文件只用于写入。如果该文件已存在则打开文件，
-    # 并从开头开始编辑，即原有内容会被删除。如果该文件不存在，创建新文件。
     file_to_recv = open(CLIENT_FOLDER + large_file_name, 'wb')
     # 接收数据包次数计数
     pkt_count = 0
-
+    expect_pkt = 0
     # 发送ACK 注意要做好所有准备(比如创建文件)后才向服务端发送ACK
-    client_socket.sendto('ACK'.encode('utf-8'), server_address)
 
     print('正在接收', large_file_name)
+    # 发送接收允许
+    client_socket.sendto('接收允许'.encode('utf-8'), server_address)
     # 开始接收数据包
-    while True:
-        # 用缓冲区接收数据包
-        packed_data, server_address = client_socket.recvfrom(BUF_SIZE)
-        # 解包，得到元组
-        unpacked_data = pkt_struct.unpack(packed_data)
-        end_flag = unpacked_data[2]
-        data = unpacked_data[3]
 
-        if end_flag != 1:
-            file_to_recv.write(data)
-        else:
-            break  # 结束标志为1,结束循环
-        # 向服务端发送ACK
-        client_socket.sendto('ACK'.encode('utf-8'), server_address)
-        pkt_count += 1
+    # 用缓冲区接收数据包
+    buff = queue.Queue()
+    client_socket.setblocking(False)
+    end_flag = False
+    flag = True
+    rwnd = buff.qsize()
+    while True:
+        try:
+            packed_data, server_address = client_socket.recvfrom(BUF_SIZE)
+
+            unpacked_data = pkt_struct.unpack(packed_data)
+
+            seq = unpacked_data[0]
+
+            if seq < expect_pkt:
+                continue
+            if seq == 200 and flag:
+                flag = False
+                continue
+            buff.put(packed_data)
+            print("收到数据包" + str(seq))
+
+
+        # 使用流控制确保在网络上传输的数据包不会大于BUFFSIZE
+        except BlockingIOError:
+
+            while not buff.empty():
+                rwnd = RCV_BUFFER_SIZE - buff.qsize() - 1
+                print("rwnd " + str(rwnd))
+                pkt = buff.get()
+                unpacked_pkt = pkt_struct.unpack(pkt)
+                seq = unpacked_pkt[0]
+                end_flag = unpacked_pkt[2]
+                data = unpacked_pkt[4]
+                print("处理数据包" + str(seq))
+                if expect_pkt != seq:
+                    while True:
+                        try:
+                            client_socket.sendto(pkt_struct.pack(*(1, expect_pkt - 1, 1, rwnd, "".encode('utf-8'))),
+                                                 server_address)
+                            print("发送ACK" + str(expect_pkt - 1))
+                            break
+                        except socket.error:
+                            continue
+
+
+                else:
+                    if end_flag != 1:
+                        pkt_count += 1
+                        file_to_recv.write(data)
+                        # time.sleep(0.1)
+                        print(str(rwnd))
+                        while True:
+                            try:
+                                client_socket.sendto(pkt_struct.pack(*(1, expect_pkt, 1, rwnd, "".encode('utf-8'))),
+                                                     server_address)
+                                print("发送ACK" + str(expect_pkt))
+                                expect_pkt += 1
+                                break
+                            except socket.error:
+                                continue
+
+        if end_flag:
+            break
 
     file_to_recv.close()
     print('成功接收的数据包数量：' + str(pkt_count))
+
+
 # 接收到lsend命令，客户端向服务端发送文件
 
 def connection_request(client_socket, server_addr, cmd, large_file_name):
@@ -298,10 +347,10 @@ def read_command(client_socket):
     pattern = re.compile(r"(LFTP) (lsend|lget) (\S+) (\S+)")
     # LFTP lget 127.0.0.1 CarlaBruni.mp3
     # LFTP lsend 127.0.0.1 CarlaBruni.mp3
-    cmd = "LFTP lsend 10.1.1.207 test1.mp4"
-    #cmd = "LFTP lget 10.1.1.207 test1.mp4"
+    #cmd = "LFTP lsend 10.1.1.207 test1.mp4"
+    #cmd = "LFTP lget 10.1.1.207 test2.mp4"
 
-    #cmd = "LFTP lsend 127.0.0.1 test.mp4"
+    cmd = "LFTP lsend 10.1.1.207 test6.mp4"
     match = pattern.match(cmd)
     if match:
         cmd = match.group(2)

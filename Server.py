@@ -4,61 +4,208 @@ import struct
 import threading
 import queue
 import time
+
 RCV_BUFFER_SIZE = 50
 BUF_SIZE = 1500
 FILE_BUF_SIZE = 1024
 SERVER_PORT = 12000
 SERVER_FOLDER = 'ServerFiles/'
+N = 50
+MAX_TIME_OUT = 0.1
+cwnd = 1
+ssthresh = 64
+mutex = threading.Lock()
 
 # 传输文件时的数据包格式(序列号，确认号，文件结束标志，1024B的数据)
 # pkt_value = (int seq, int ack, int end_flag 1024B的byte类型 data)
 pkt_struct = struct.Struct('IIII1024s')
 
-def recv_ACK(server_socket):
-    while True:
-        try:
-            data, client_address = server_socket.recvfrom(BUF_SIZE)
-            unpacked_data = pkt_struct.unpack(data)
-            print("接收ACK", unpacked_data[0])
+def timeout(base, nextseqnum, sendBuffer,server_socket,lastSendPacketNum, client_address ) :
+    print("发送超时， 出现丢包, 重新发送分组")
+
+    global cwnd
+    global ssthresh
+
+    mytimer = threading.Timer(MAX_TIME_OUT, timeout, [base, nextseqnum, sendBuffer, server_socket, lastSendPacketNum,client_address])
+    mytimer.start()
+
+    # if (len(sendBuffer) == 1) :
+    #     print("缓冲区为空， 重发数据包确认成功，停止重发")
+    #     mytimer.cancel()
+    if mutex.acquire(1):
+        ssthresh = cwnd / 2
+
+        if (ssthresh < 1) :
+            ssthresh = 1
+
+        cwnd = 1
+        print("更新cwnd值为" + str(cwnd), "  更新ssthresh值为" + str(ssthresh))
+        mutex.release()
+
+
+
+    print("重新 send packet:" + str(base) + "~" + str(nextseqnum - 1))
+    for i in range (base, nextseqnum + 1):
+        try :
+            server_socket.sendto(sendBuffer[i], client_address)
+            print ("重新发送packet: " + str(i))
         except:
-            break
-
-
+            mytimer.cancel()
 
 # 接收到lget命令，向客户端发送文件
 def lget(server_socket, client_address, large_file_name):
-    print('正在发送', large_file_name)
+    server_socket.setblocking(False)
+    print("LFTP lget", client_address, large_file_name)
+    pkt_count = 0
+    # 发送数据包次数计数
     # 模式rb 以二进制格式打开一个文件用于只读。文件指针将会放在文件的开头。
     file_to_send = open(SERVER_FOLDER + large_file_name, 'rb')
-    # 发送数据包次数计数
-    pkt_count = 0
 
-    thread = threading.Thread(target=recv_ACK, args=(server_socket, ))
-    thread.start()
+    # 发送ACK 注意要做好所有准备(比如打开文件)后才向服务端发送ACK
+    #server_socket.sendto('ACK'.encode('utf-8'), client_address)
+
+    # 等待服务端的接收允许
+    #while True:
+    #    try:
+    #       message, client_address = server_socket.recvfrom(BUF_SIZE)
+    #        break
+    #    except:
+    #        pass
+
+    #print('来自', client_address, '的数据是: ', message.decode('utf-8'))
+
+    print('正在发送', large_file_name)
+
+    # 全局变量初始化
+    sendBuffer = {}
+    base = 0
+    nextseqnum = 0
+    rwnd = 1
+    global cwnd
+    global ssthresh
+    cwnd = 1
+    add = 0
+    ssthresh = 64
+    lastOldPat = 0
+
+    # timeout时间为两秒
+
+    lastSendPacketNum = -1
+
+    mytimer = threading.Timer(MAX_TIME_OUT, timeout, [base, nextseqnum, sendBuffer, server_socket, lastSendPacketNum,client_address])
+
+    end_flag = False
     # 用缓冲区循环发送数据包
-
     while True:
-        data = file_to_send.read(FILE_BUF_SIZE)
-        seq = pkt_count
-        ack = pkt_count
 
-        # 将元组打包发送
-        if str(data) != "b''":  # b''表示文件读完
-            end_flag = 0
-            server_socket.sendto(pkt_struct.pack(*(seq, ack, end_flag, 0, data)), client_address)
-        else:
-            end_flag = 1    # 发送的结束标志为1，表示文件已发送完毕
-            server_socket.sendto(pkt_struct.pack(*(seq, ack, end_flag, 0, 'end'.encode('utf-8'))), client_address)
-            break
-        # 等待客户端ACK
-        print("发送seq" + str(seq))
+        # 如果接收到接收方的确认信息
+        try:
+
+            message, client_address = server_socket.recvfrom(BUF_SIZE)
+
+            unpacked_message = pkt_struct.unpack(message)
+
+            print("receive ack packet:" + str(unpacked_message[1]) + "    lastOldPat: " + str(lastOldPat))
+
+            print("-------------------------------cwnd:", str(cwnd))
+
+            newBase = int(unpacked_message[1]) + 1
+            rwnd = int(unpacked_message[3])
+
+            print("--------------------------------rwnd:", str(rwnd))
+
+            if (newBase == lastSendPacketNum + 1):
+                mytimer.cancel()
+
+                break
+
+            # 更新缓冲区  把已经确认的包从缓冲区清除
+            print("packet " + str(base) + "~" + str(newBase - 1) + "从缓冲区删除")
+
+            for i in (base - 1, newBase - 1):
+                try:
+                    del sendBuffer[i]
+                    if cwnd > ssthresh:
+                        if add >= cwnd:
+                            cwnd += 1
+                            add = 0
+                        else:
+                            add += 1
+                    else:
+                        cwnd += 1
+
+                except:
+                    pass
+
+            base = newBase
+
+            if (base == nextseqnum):
+                mytimer.cancel()
+            else:
+                mytimer.cancel()
+                mytimer = threading.Timer(MAX_TIME_OUT, timeout,
+                                          [base, nextseqnum, sendBuffer, server_socket, lastSendPacketNum,client_address])
+                mytimer.start()
 
 
-        pkt_count += 1
+        except socket.error:
 
-    file_to_send.close()
+            if end_flag:
+                continue
+
+            # print("此时rwnd为：" + str(rwnd) + " base = " + str(base) + "nextseqnum = " + str(nextseqnum))
+            # 当传送的包num 小于base + 窗口值， 就能继续发送包
+
+            if nextseqnum - base > rwnd:
+                # print("接受方缓存存在限制 rwnd, 发送速率过快拒绝发送")
+                continue
+                pass
+
+            elif nextseqnum >= base + N:
+                # print("发送方缓存存在限制 N, 发送速率过快拒绝发送")
+                continue
+            elif nextseqnum - base > cwnd:
+                # print("受拥塞控制限制，发送速率拒绝发送")
+                continue
+                pass
+            ## 发送缓冲区所有包
+
+            # for i in range (minRE_CW):
+            else:
+                data = file_to_send.read(FILE_BUF_SIZE)
+                seq = pkt_count
+                ack = pkt_count
+
+                print("send packet:" + str(nextseqnum))
+
+                # 将元组打包发送
+                if str(data) != "b''":  # b''表示文件读完
+                    end_flag = 0
+                    # rnwd发送方没用到， 为-1
+                    server_socket.sendto(pkt_struct.pack(*(nextseqnum, ack, end_flag, 1, data)), client_address)
+                else:
+                    end_flag = 1  # 发送的结束标志为1，表示文件已发送完毕
+                    lastSendPacketNum = nextseqnum
+                    # rnwd发送方没用到， 为-1
+                    print("=============================" + str(lastSendPacketNum) + "============================== ")
+                    server_socket.sendto(pkt_struct.pack(*(nextseqnum, ack, end_flag, 1, 'end'.encode('utf-8'))),
+                                         client_address)
+
+                # 把发送的包加入缓冲区, 便于重传
+                print("packet " + str(nextseqnum) + "加入缓冲区")
+                sendBuffer[nextseqnum] = pkt_struct.pack(*(nextseqnum, ack, end_flag, 1, data))
+
+                # 当base和nextseqnum相等时， 开始计时
+                if (base == nextseqnum):
+                    mytimer = threading.Timer(MAX_TIME_OUT, timeout,
+                                              [base, nextseqnum, sendBuffer, server_socket, lastSendPacketNum,client_address])
+                    mytimer.start()
+                nextseqnum = nextseqnum + 1
+                pkt_count += 1
+
+            lastOldPat = nextseqnum - 1
+
     print(large_file_name, '发送完毕，发送数据包的数量：' + str(pkt_count))
-    
 
 
 # 接收到lsend命令，客户端向服务端发送文件
@@ -97,7 +244,7 @@ def lsend(server_socket, client_address, large_file_name):
             print("收到数据包" + str(seq))
 
 
-        #使用流控制确保在网络上传输的数据包不会大于BUFFSIZE
+        # 使用流控制确保在网络上传输的数据包不会大于BUFFSIZE
         except BlockingIOError:
 
             while not buff.empty():
@@ -112,7 +259,8 @@ def lsend(server_socket, client_address, large_file_name):
                 if expect_pkt != seq:
                     while True:
                         try:
-                            server_socket.sendto(pkt_struct.pack(*(1, expect_pkt - 1, 1, rwnd, "".encode('utf-8'))), client_address)
+                            server_socket.sendto(pkt_struct.pack(*(1, expect_pkt - 1, 1, rwnd, "".encode('utf-8'))),
+                                                 client_address)
                             print("发送ACK" + str(expect_pkt - 1))
                             break
                         except socket.error:
@@ -123,11 +271,12 @@ def lsend(server_socket, client_address, large_file_name):
                     if end_flag != 1:
                         pkt_count += 1
                         file_to_recv.write(data)
-                        #time.sleep(0.1)
+                        # time.sleep(0.1)
                         print(str(rwnd))
                         while True:
                             try:
-                                server_socket.sendto(pkt_struct.pack(*(1, expect_pkt, 1, rwnd, "".encode('utf-8'))), client_address)
+                                server_socket.sendto(pkt_struct.pack(*(1, expect_pkt, 1, rwnd, "".encode('utf-8'))),
+                                                     client_address)
                                 print("发送ACK" + str(expect_pkt))
                                 expect_pkt += 1
                                 break
@@ -178,7 +327,6 @@ def serve_client(client_address, message):
         lsend(server_socket, client_address, large_file_name)
 
     # 关闭socket
-
 
     server_socket.close()
 
