@@ -5,15 +5,25 @@ import threading
 import queue
 import time
 
+#接受的缓存队列的最大大小
 RCV_BUFFER_SIZE = 50
+#socket接受的缓存大小
 BUF_SIZE = 1040
+#数据包的数据大小
 FILE_BUF_SIZE = 1024
+# socket端口
 SERVER_PORT = 12000
+# 服务器文件夹
 SERVER_FOLDER = 'ServerFiles/'
-N = 50
-MAX_TIME_OUT = 0.1
+#发送的缓存字典大小
+SEND_BUFFER_SIZE = 50
+#超时时间
+MAX_TIME_OUT = 1
+
 cwnd = 1
 ssthresh = 64
+
+#互斥锁 用于修改ssthresh值
 mutex = threading.Lock()
 
 # 传输文件时的数据包格式(序列号，确认号，文件结束标志，1024B的数据)
@@ -29,11 +39,9 @@ def timeout(base, nextseqnum, sendBuffer,server_socket,lastSendPacketNum, client
     mytimer = threading.Timer(MAX_TIME_OUT, timeout, [base, nextseqnum, sendBuffer, server_socket, lastSendPacketNum,client_address])
     mytimer.start()
 
-    # if (len(sendBuffer) == 1) :
-    #     print("缓冲区为空， 重发数据包确认成功，停止重发")
-    #     mytimer.cancel()
     if mutex.acquire(1):
-        ssthresh = cwnd / 2
+        # 整除 保证没有小数
+        ssthresh = cwnd // 2
 
         if (ssthresh < 1) :
             ssthresh = 1
@@ -61,19 +69,6 @@ def lget(server_socket, client_address, large_file_name):
     # 模式rb 以二进制格式打开一个文件用于只读。文件指针将会放在文件的开头。
     file_to_send = open(SERVER_FOLDER + large_file_name, 'rb')
 
-    # 发送ACK 注意要做好所有准备(比如打开文件)后才向服务端发送ACK
-    #server_socket.sendto('ACK'.encode('utf-8'), client_address)
-
-    # 等待服务端的接收允许
-    #while True:
-    #    try:
-    #       message, client_address = server_socket.recvfrom(BUF_SIZE)
-    #        break
-    #    except:
-    #        pass
-
-    #print('来自', client_address, '的数据是: ', message.decode('utf-8'))
-
     print('正在发送', large_file_name)
 
     # 全局变量初始化
@@ -88,7 +83,6 @@ def lget(server_socket, client_address, large_file_name):
     ssthresh = 64
     lastOldPat = 0
 
-    # timeout时间为两秒
 
     lastSendPacketNum = -1
 
@@ -112,7 +106,7 @@ def lget(server_socket, client_address, large_file_name):
             newBase = int(unpacked_message[1]) + 1
             rwnd = int(unpacked_message[3])
 
-            print("--------------------------------rwnd:", str(rwnd))
+            print("-------------------------------rwnd:", str(rwnd))
 
             if (newBase == lastSendPacketNum + 1):
                 mytimer.cancel()
@@ -147,7 +141,6 @@ def lget(server_socket, client_address, large_file_name):
                                           [base, nextseqnum, sendBuffer, server_socket, lastSendPacketNum,client_address])
                 mytimer.start()
 
-
         except socket.error:
 
             if end_flag:
@@ -161,8 +154,8 @@ def lget(server_socket, client_address, large_file_name):
                 continue
                 pass
 
-            elif nextseqnum >= base + N:
-                # print("发送方缓存存在限制 N, 发送速率过快拒绝发送")
+            elif nextseqnum >= base + SEND_BUFFER_SIZE:
+                # print("发送方缓存存在限制 SEND_BUFFER_SIZE, 发送速率过快拒绝发送")
                 continue
             elif nextseqnum - base > cwnd:
                 # print("受拥塞控制限制，发送速率拒绝发送")
@@ -271,8 +264,7 @@ def lsend(server_socket, client_address, large_file_name):
                     if end_flag != 1:
                         pkt_count += 1
                         file_to_recv.write(data)
-                        # time.sleep(0.1)
-                        print(str(rwnd))
+                        #time.sleep(0.1)
                         while True:
                             try:
                                 server_socket.sendto(pkt_struct.pack(*(1, expect_pkt, 1, rwnd, "".encode('utf-8'))),
@@ -295,8 +287,8 @@ def serve_client(client_address, message):
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
     # 来自客户端的命令，格式为[lsend|lget]#large_file_name，因此文件命名不允许含有#
-    cmd = message.decode('utf-8').split('#')[0]
-    large_file_name = message.decode('utf-8').split('#')[1]
+    cmd = message.decode('utf-8').split('$')[0]
+    large_file_name = message.decode('utf-8').split('$')[1]
 
     if cmd == 'lget':
         # 文件不存在，并告知客户端
@@ -305,8 +297,6 @@ def serve_client(client_address, message):
             # 关闭socket
             server_socket.close()
             return
-
-        # TODO: 在此要把各样工作准备好，再发送连接允许
 
         # 连接允许
         server_socket.sendto('连接允许'.encode('utf-8'), client_address)
@@ -322,12 +312,9 @@ def serve_client(client_address, message):
         message, client_address = server_socket.recvfrom(BUF_SIZE)
         print('来自', client_address, '的数据是: ', message.decode('utf-8'))
 
-        # TODO: 在此要把各样工作准备好，再发送接收允许(在lsend内)
-
         lsend(server_socket, client_address, large_file_name)
 
     # 关闭socket
-
     server_socket.close()
 
 
@@ -337,7 +324,6 @@ def main():
         print('创建文件夹', SERVER_FOLDER)
         os.mkdir(SERVER_FOLDER)
 
-    # 创建服务端主socket，周知端口号为SERVER_PORT
     server_main_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     server_main_socket.bind(('', SERVER_PORT))
 

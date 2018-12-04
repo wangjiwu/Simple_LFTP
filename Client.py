@@ -16,10 +16,11 @@ SERVER_PORT = 12000
 #接受的缓存队列的最大大小
 RCV_BUFFER_SIZE = 50
 #接收文件名
-CLIENT_FOLDER = 'ClientFiles/'   # 接收文件夹
+CLIENT_FOLDER = 'ClientFiles/'   # 客户端文件夹
 #发送的缓存字典大小
 SEND_BUFFER_SIZE = 50
 #超时时间
+
 MAX_TIME_OUT = 0.1
 cwnd = 1
 ssthresh = 64
@@ -44,7 +45,8 @@ def timeout(base, nextseqnum, sendBuffer,client_socket,lastSendPacketNum, server
 
     #当进入超时操作时 阻塞控制 使得cwnd为1， ssthresh 为当时的cwnd的一半， 利用互斥锁使得更改ssthresh不会冲突
     if mutex.acquire(1):
-        ssthresh = cwnd / 2
+        #整除 保证没有小数
+        ssthresh = cwnd // 2
         #防止ssthresh变为负数
         if (ssthresh < 1) :
             ssthresh = 1
@@ -152,7 +154,7 @@ def lsend(client_socket, server_address, large_file_name):
             #更新base值
             base = newBase
 
-            #如果缓冲区为0  停止定时器， 否则启动第三期
+            #如果缓冲区为0  停止定时器， 否则启动计数器
             if (base == nextseqnum):
                 mytimer.cancel()
             else:
@@ -189,6 +191,10 @@ def lsend(client_socket, server_address, large_file_name):
 
                 print("send packet:" + str(nextseqnum))
 
+                #把发送的包加入缓冲区, 便于重传
+                print ("packet " + str(nextseqnum) + "加入缓冲区")
+                sendBuffer[nextseqnum] = pkt_struct.pack(*(nextseqnum, ack, end_flag, 1, data))
+
                 # 将元组打包发送
                 if str(data) != "b''":  # b''表示文件读完
                     end_flag = 0
@@ -201,10 +207,6 @@ def lsend(client_socket, server_address, large_file_name):
                     print ("=============================" +  str(lastSendPacketNum) + "============================== ")
                     client_socket.sendto(pkt_struct.pack(*(nextseqnum, ack, end_flag, 1 , 'end'.encode('utf-8'))), server_address)
                     break
-
-                #把发送的包加入缓冲区, 便于重传
-                print ("packet " + str(nextseqnum) + "加入缓冲区")
-                sendBuffer[nextseqnum] = pkt_struct.pack(*(nextseqnum, ack, end_flag, 1, data))
 
                 #当base和nextseqnum相等时， 开始计时
                 if (base == nextseqnum) :
@@ -311,8 +313,8 @@ def connection_request(client_socket, server_addr, cmd, large_file_name):
         exit(2)
 
     # 三次握手
-    # 连接请求，格式为[lsend|lget]#large_file_name，因此文件命名不允许含有#
-    client_socket.sendto((cmd + '#' + large_file_name).encode('utf-8'), server_addr)
+    # 连接请求，格式为[lsend|lget]$large_file_name，因此文件命名不允许含有$
+    client_socket.sendto((cmd + '$' + large_file_name).encode('utf-8'), server_addr)
     # 接收连接允许报文
 
     while True :
@@ -340,14 +342,13 @@ def connection_request(client_socket, server_addr, cmd, large_file_name):
 
 
 def read_command(client_socket):
-    #print('请输入命令: LFTP [lsend | lget] server_address large_file_name')
+    print('请输入命令: LFTP [lsend | lget] server_address large_file_name')
     pattern = re.compile(r"(LFTP) (lsend|lget) (\S+) (\S+)")
-    # LFTP lget 127.0.0.1 CarlaBruni.mp3
-    # LFTP lsend 127.0.0.1 CarlaBruni.mp3
-    #cmd = "LFTP lsend 10.1.1.207 test1.mp4"
-    #cmd = "LFTP lget 10.1.1.207 test2.mp4"
 
-    cmd = "LFTP lsend 127.0.0.1 test6.mp4"
+    #cmd = "LFTP lsend 127.0.0.1 test.mp4"
+
+    cmd = input()
+
     match = pattern.match(cmd)
     if match:
         cmd = match.group(2)
