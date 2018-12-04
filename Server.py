@@ -6,7 +6,7 @@ import queue
 import time
 
 RCV_BUFFER_SIZE = 50
-BUF_SIZE = 1500
+BUF_SIZE = 1040
 FILE_BUF_SIZE = 1024
 SERVER_PORT = 12000
 SERVER_FOLDER = 'ServerFiles/'
